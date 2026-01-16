@@ -36,16 +36,6 @@ class HumanIntervention(gym.ActionWrapper):
         return pose_matrix
     
 
-
-    def transform_pose(self, current_pose: np.ndarray, target_pose: np.ndarray) -> np.ndarray:
-        curr_matrix = self.pose2matrix(current_pose)
-        tar_matrix = self.pose2matrix(target_pose)
-
-
-        T_diff_matrix = np.dot(np.linalg.inv(curr_matrix), tar_matrix)
-
-        return T_diff_matrix
-
     def action(self, action: np.ndarray) -> np.ndarray:
         # intervened = True
         intervened = shared_state.human_intervention_key

@@ -64,7 +64,6 @@ class BaseEnv(gym.Env):
         fake_env=False,
         config=None,
     ):
-        print('before init BaseEnv')
         self.config = config
         self._gripper_sleep = config.gripper_sleep
         self.joint_dim = config.joint_dim
@@ -90,7 +89,6 @@ class BaseEnv(gym.Env):
         self.hz = config.hz
 
         image_resize = config.image_resize
-        print_green(f'in BaseEnv image_resize: {image_resize}')
 
         state_dict = {
                         "tcp_pose": gym.spaces.Box(
@@ -179,7 +177,6 @@ class BaseEnv(gym.Env):
         self.save_frame = False
         self.obs_pre = None
         self.last_gripper_value = 1.0 if self.close_gripper else 0.0
-        print('after init BaseEnv')
 
 
 
@@ -293,8 +290,7 @@ class BaseEnv(gym.Env):
                 tar_euler_new = Rotation.from_matrix(tar_pose_new[:3, :3]).as_euler("xyz")
                 
                 # Calculate the current pose's euler angle
-                cur_euler = self.pose_quat2euler(self.currpos)
-                # print("cur_euler:", cur_euler)      
+                cur_euler = self.pose_quat2euler(self.currpos)  
 
                 # Calculate the new target pose (position + euler angle + gripper)
                 next_pos = np.hstack([tar_pose_new[:3,3], tar_euler_new, action[-1] * self.action_scale[2]])
