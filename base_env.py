@@ -64,7 +64,6 @@ class BaseEnv(gym.Env):
         fake_env=False,
         config=None,
     ):
-        print('before init BaseEnv')
         self.config = config
         self._gripper_sleep = config.gripper_sleep
         self.joint_dim = config.joint_dim
@@ -88,7 +87,6 @@ class BaseEnv(gym.Env):
         self.hz = config.hz
 
         image_resize = config.image_resize
-        print_green(f'in BaseEnv image_resize: {image_resize}')
 
         state_dict = {
                         "tcp_pose": gym.spaces.Box(
@@ -150,11 +148,6 @@ class BaseEnv(gym.Env):
             np.array(config.abs_pose_limit_high[:3]),
             dtype=np.float64,
         )
-        self.rpy_bounding_box = gym.spaces.Box(
-            np.array(config.abs_pose_limit_low[3:]),
-            np.array(config.abs_pose_limit_high[3:]),
-            dtype=np.float64,
-        )
         
         
         self.image_crop = {}
@@ -177,7 +170,6 @@ class BaseEnv(gym.Env):
         self.save_frame = False
         self.obs_pre = None
         self.last_gripper_value = 1.0 if self.close_gripper else 0.0
-        print('after init BaseEnv')
 
 
 
