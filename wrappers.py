@@ -17,7 +17,6 @@ class HumanIntervention(gym.ActionWrapper):
         self.robot_type = env.unwrapped.robot_type
         self.env.unwrapped.init_xtele() # init xtele
         self.control_mode = env.unwrapped.control_mode
-        self.enable_rotation = env.unwrapped.enable_rotation
     
 
     def reset(self, **kwargs):

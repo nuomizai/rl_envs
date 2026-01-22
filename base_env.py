@@ -79,7 +79,6 @@ class BaseEnv(gym.Env):
         self.max_episode_length = config.max_episode_length
         self.absolute_action = config.absolute_action
         self.control_mode = config.control_mode
-        self.enable_rotation = config.enable_rotation
         self.close_gripper = config.close_gripper
         self.fix_gripper = config.fix_gripper
         self.ego_mode = config.ego_mode
@@ -148,11 +147,6 @@ class BaseEnv(gym.Env):
         self.xyz_bounding_box = gym.spaces.Box(
             np.array(config.abs_pose_limit_low[:3]),
             np.array(config.abs_pose_limit_high[:3]),
-            dtype=np.float64,
-        )
-        self.rpy_bounding_box = gym.spaces.Box(
-            np.array(config.abs_pose_limit_low[3:]),
-            np.array(config.abs_pose_limit_high[3:]),
             dtype=np.float64,
         )
         
@@ -267,10 +261,8 @@ class BaseEnv(gym.Env):
                 action = action.clip(-1, 1)
                 
                 action_t = action[0:3] * self.action_scale[0]
-                if self.enable_rotation:
-                    action_euler = action[3:6] * self.action_scale[1]
-                else:
-                    action_euler = np.array([0, 0, 0])
+                action_euler = action[3:6] * self.action_scale[1]
+
                 
                 # Action transformation matrix
                 action_mat = Rotation.from_euler("xyz", action_euler).as_matrix()
@@ -295,11 +287,7 @@ class BaseEnv(gym.Env):
                 # Calculate the new target pose (position + euler angle + gripper)
                 next_pos = np.hstack([tar_pose_new[:3,3], tar_euler_new, action[-1] * self.action_scale[2]])
                 next_pos = self.clip_safety_box(next_pos)
-                if not self.enable_rotation:
-                    if "franka" in self.robot_type:
-                        next_pos[3:6] = [3.14, 0, 0]
-                    else:
-                        raise NotImplementedError(f"Robot {self.robot_type} does not support disable_rotation mode")
+
             obs = self._send_pos_command(next_pos, include_gripper) 
             curr_pose_euler = self.pose_quat2euler(obs['arm_pose']['single'])
         else:
