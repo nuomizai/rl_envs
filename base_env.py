@@ -10,12 +10,11 @@ import copy
 from scipy.spatial.transform import Rotation
 import time
 from typing import Dict
+from pathlib import Path
 
 
-from xrocs.core.config_loader import ConfigLoader
-from xrocs.core.station_loader import StationLoader
-from xrocs.common.data_type import Joints
-
+from rl_envs.xrocs.core.config_loader import ConfigLoader
+from rl_envs.xrocs.core.station_loader import StationLoader
 
 
 
@@ -129,17 +128,15 @@ class BaseEnv(gym.Env):
             print_green("fake env : not connect to robot")
             return 
 
-        cfg_loader = ConfigLoader("/home/eai/Documents/configuration.toml")
+        # 使用基于文件位置的路径，避免依赖工作目录
+        # Use file-based path to avoid dependency on working directory
+        base_dir = Path(__file__).parent.absolute()
+        config_path = base_dir / "xrocs" / "configuration.toml"
+        cfg_loader = ConfigLoader(str(config_path))
         self.cfg_dict = cfg_loader.get_config()
         station_loader = StationLoader(self.cfg_dict)
         self.robot_station = station_loader.generate_station_handle()
-        try:
-            self.robot_station.connect()
-        except Exception as e:
-            print(f"[{type(e).__name__}] {e!r}")
-            traceback.print_exc()          # full stacktrace
-            sys.exit(1)
-        
+        self.robot_station.connect()
         self._update_currpos()
         self.last_gripper_act = time.time()
 
@@ -193,6 +190,7 @@ class BaseEnv(gym.Env):
             joints = self.tele_agent.act()
             joints = list(joints)
             xtele_ee_pose = self.robot_station.get_ee_pose_from_joint(joints[0:self.joint_dim])
+            
             recv = {
                 'joints': joints,
                 'pose': xtele_ee_pose,
@@ -277,8 +275,7 @@ class BaseEnv(gym.Env):
             tar_euler_new = Rotation.from_matrix(tar_pose_new[:3, :3]).as_euler("xyz")
             
             # Calculate the current pose's euler angle
-            cur_euler = self.pose_quat2euler(self.currpos)
-            # print("cur_euler:", cur_euler)      
+            cur_euler = self.pose_quat2euler(self.currpos)  
 
             # Calculate the new target pose (position + euler angle + gripper)
             next_pos = np.hstack([tar_pose_new[:3,3], tar_euler_new, action[-1] * self.action_scale[2]])
@@ -308,6 +305,7 @@ class BaseEnv(gym.Env):
     def reset(self, **kwargs):
         self.last_gripper_act = time.time()
         if self.ego_mode:
+            
             # provide intervention and reset from the only one person in the scene
             self.last_gripper_value = 1.0 if self.close_gripper else 0.0
             self.sync_xtele()
@@ -361,40 +359,41 @@ class BaseEnv(gym.Env):
 
         # if np.linalg.norm(curr_pose - reset_pose) > 0.15 or joint_reset:
         assert self._reset_joint.shape == (self.joint_dim,)
-        if "ur" in self.robot_type:
-            arm_joints = np.append(self.curr_arm_joints, self.last_gripper_value)
-            for _ in range(5):
-                self._send_joint_command(arm_joints, include_gripper=False)
-                time.sleep(1 / self.hz)
+        # if "ur" in self.robot_type:
+        #     arm_joints = np.append(self.curr_arm_joints, self.last_gripper_value)
+        #     for _ in range(5):
+        #         self._send_joint_command(arm_joints, include_gripper=False)
+        #         time.sleep(1 / self.hz)
                 
-            for name, _robot in self.robot_station.get_robot_handle().items():
-                goal_joints = Joints(self._reset_joint, num_of_dofs=self.joint_dim)
-                try:
-                    return_val =_robot.reach_target_joint(goal_joints)
-                except Exception as e:
-                    print(f"Error in reach_target_joint: {e}")
-            for _ in range(5):
-                self._send_joint_command(self._reset_joint, include_gripper=False)
-                time.sleep(1 / self.hz)
-        else:
-            goal_joints = self._reset_joint.copy()
-            # Combine the current joints and gripper position 
-            curr_joints = np.concatenate([self.curr_arm_joints, np.array([self.curr_gripper_joints])])
-            # Combine the target joints and gripper position
-            goal_joints = np.concatenate([goal_joints, np.array([self.last_gripper_value])])
-            cnt = int(3 / (1 / self.hz))
-            # Generate a linear interpolation path from the current joints to the target joints (smooth transition)
-            path = np.linspace(curr_joints, goal_joints, cnt)
-            for p in path:
-                self._send_joint_command(p, include_gripper=False)
-                time.sleep(1 / self.hz)
+        #     for name, _robot in self.robot_station.get_robot_handle().items():
+        #         goal_joints = Joints(self._reset_joint, num_of_dofs=self.joint_dim)
+        #         try:
+        #             return_val =_robot.reach_target_joint(goal_joints)
+        #         except Exception as e:
+        #             print(f"Error in reach_target_joint: {e}")
+        #     for _ in range(5):
+        #         self._send_joint_command(self._reset_joint, include_gripper=False)
+        #         time.sleep(1 / self.hz)
+        # else:
+        goal_joints = self._reset_joint.copy()
+        # Combine the current joints and gripper position 
+        curr_joints = np.concatenate([self.curr_arm_joints, np.array([self.curr_gripper_joints])])
+        # Combine the target joints and gripper position
+        goal_joints = np.concatenate([goal_joints, np.array([self.last_gripper_value])])
+        cnt = int(3 / (1 / self.hz))
+        # Generate a linear interpolation path from the current joints to the target joints (smooth transition)
+        path = np.linspace(curr_joints, goal_joints, cnt)
+        for p in path:
+            self._send_joint_command(p, include_gripper=False)
+            time.sleep(1 / self.hz)
 
         self._update_currpos()
-        reset_pose = self.currpos.copy()
-        reset_pose = self.pose_quat2euler(reset_pose)
+        curr_pose = self.currpos.copy()
+        curr_pose = self.pose_quat2euler(curr_pose)
         
         # If random reset is enabled, add random perturbations to the xy plane and rotation angle
         if self._random_reset:  
+            reset_pose = curr_pose.copy()
             # Add random offset to the xy plane
             reset_pose[:2] += np.random.uniform(
                 -self._random_xy_range, self._random_xy_range, (2,)
@@ -407,7 +406,11 @@ class BaseEnv(gym.Env):
                 -self._random_rz_range, self._random_rz_range
             )
             reset_pose[3:] = axis_random
-            self._send_pos_command(reset_pose, include_gripper=False)
+            cnt = int(1 / (1 / self.hz))
+            path = np.linspace(curr_pose, reset_pose, cnt)
+            for p in path:
+                self._send_pos_command(p, include_gripper=False)
+                time.sleep(1 / self.hz)
 
 
     def _send_joint_command(self, joints: np.ndarray, include_gripper=False):
@@ -451,7 +454,7 @@ class BaseEnv(gym.Env):
                 "hand_joints": {"single": self.last_gripper_value}
             }
             obs = self.robot_station.step_ee(robot_target)
-        else:
+        elif "franka" in self.robot_type:
             arm_pose = np.append(pose[0:6], self.last_gripper_value)
             robot_target = {
                 "arm_pose": {
@@ -459,14 +462,8 @@ class BaseEnv(gym.Env):
                 },
                 "hand_joints": {}
             }
-            if "franka" in self.robot_type:
-                currpose = self.currpos.copy()
-                currpose_t, currpose_quat = currpose[0:3], currpose[3:]
-                currpose_quat = Rotation.from_quat(currpose_quat).as_euler("xyz")
-                currpose = np.hstack([currpose_t, currpose_quat])
-                obs = self.robot_station.step_ee(robot_target)
-            else:
-                raise NotImplementedError("Unknown robot type")
+        else:
+            raise NotImplementedError("Unknown robot type")
         return obs
 
 
@@ -510,7 +507,6 @@ class BaseEnv(gym.Env):
 
     def _get_obs_from_robot(self) -> dict:
         obs = self.robot_station.get_obs()
-        
         # standardize arm_pose
         arm_pose = obs['arm_pose']['single']
         arm_pose_t, arm_pose_quat = arm_pose[0:3], arm_pose[3:]

@@ -5,7 +5,6 @@ import gymnasium as gym
 from scipy.spatial.transform import Rotation
 from gymnasium.spaces import Box
 from gymnasium.spaces import flatten_space, flatten
-from xrocs.utils.logger.logger_loader import logger
 from rl_envs.shared_state import shared_state
 import cv2
 import traceback

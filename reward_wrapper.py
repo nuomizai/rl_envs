@@ -165,8 +165,6 @@ class MultiCameraBinaryRewardClassifierWrapper(gym.Wrapper):
         step_st_time = time.time()
         self.time_step += 1
         obs, rew, _, truncated, info = self.env.step(action)
-        # obs, rew, _, truncated, info = self.lp_wrapper(action)
-        # self.lp.print_stats()
         reward_st_time = time.time()
         reward_obs = copy.deepcopy(obs)
         reward_obs = make_policy_obs(reward_obs, self.device, self.robot_type)
@@ -183,9 +181,10 @@ class MultiCameraBinaryRewardClassifierWrapper(gym.Wrapper):
         terminated = success
 
         if truncated:
-            print("任务超时，将自动重置")
+            # print("任务超时，将自动重置")
+            print("Task timed out, will be automatically reset")
             time.sleep(1)
-            # print("Task timed out, will be automatically reset")
+
         classifier_need_update = False
         
         if self.time_step <= 10:

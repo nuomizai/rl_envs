@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+import argparse
+import xtele.core.main as xtele
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run xRocs with the specified mode and config file.")
+    parser.add_argument("--mode", type=str, choices=["cali", "getstates", "systemtest", "checksign", "remote"], default="getstates",
+                        help="The mode to use. Default is 'getstates'. Ignored if --openconfig is provided.")
+    parser.add_argument("--config", type=str, default="~/.config/xhumanoid/xtele/default.toml",
+                        help="The path to the config file. Default is '~/.config/xhumanoid/xtele/default.toml'.")
+    parser.add_argument("--openconfig", action="store_true",
+                        help="Open the configuration file. If provided, ignores --mode.")
+    args = parser.parse_args()
+    xtele.main(args)
