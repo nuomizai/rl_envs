@@ -1,14 +1,3 @@
-"""
-Creator: Jacob Ji
-Developer
-    - Shane Xie
-First create: 2023-03-18
-Last  modify: 2025-06-20
-
-Version History:
-v1.6.0 - Support for teleoperation product.
-"""
-
 from typing import Sequence
 
 from xtele.equipment.dynamixel.linker_agent import LinkerAgent, GripperAgent

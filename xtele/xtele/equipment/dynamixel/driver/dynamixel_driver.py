@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""
-Creator: Eric Xu
-Developer
-    - Jacob Ji
-    - Shane Xie
-First create: 2024-07-15
-Last  modify: 2025-07-11
-
-Version History:
-v1.6.0 - Support for teleoperation product.
-
-Requirement description:
-    dynamixel_sdk: local version
-"""
-
 import enum
 import os
 import queue

@@ -4,7 +4,6 @@ from threading import Thread, Event
 from typing import Optional, Sequence, Union
 
 import numpy as np
-import pinocchio as pin
 
 from xtele.common.common import SerialParams
 from xtele.equipment.dynamixel.driver.dynamixel_driver import DynamixelDriver
