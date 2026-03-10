@@ -332,15 +332,18 @@ class MultiCameraBinaryRewardClassifierWrapper(gym.Wrapper):
         return obs, rew, terminated, truncated, info
 
 
-    
+
+
 
 
 class GripperPenaltyWrapper(gym.Wrapper):
     def __init__(self, env, penalty=-0.05):
         super().__init__(env)
-        assert env.action_space.shape == (7,)
+        # assert env.action_space.shape == (7,)
         self.penalty = penalty
         self.last_gripper_pos = None
+        self.dual_arm = env.unwrapped.dual_arm
+        self.robot_type = env.unwrapped.robot_type
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -355,12 +358,28 @@ class GripperPenaltyWrapper(gym.Wrapper):
         if "intervene_action" in info:
             action = info["intervene_action"]
 
-
-        if (action[-1] > 0.3 and self.last_gripper_pos < 0.3) or (
-            action[-1] < 0.5 and self.last_gripper_pos > 0.5):
-            info['discrete_penalty'] = -0.5
+        if self.dual_arm:
+            if "tienkung" in self.robot_type:
+                dual_action = {
+                        "left": action[0:7],
+                        "right": action[7:14],
+                        }
+                for name in self.curr_arm_joints.keys():
+                    # 双臂动作有一个触发夹爪惩罚时，即进行惩罚
+                    if info['discrete_penalty'] == 0.0:
+                        if (dual_action[name][-1] > 0.3 and self.last_gripper_pos[name] < 0.3) or (
+                            dual_action[name][-1] < 0.5 and self.last_gripper_pos[name] > 0.5):
+                            info['discrete_penalty'] = -0.5
+                        else:
+                            info['discrete_penalty'] = 0.0
+            else:
+                raise NotImplementedError("Unknown robot type")
         else:
-            info['discrete_penalty'] = 0.0
+            if (action[-1] > 0.3 and self.last_gripper_pos < 0.3) or (
+                action[-1] < 0.5 and self.last_gripper_pos > 0.5):
+                info['discrete_penalty'] = -0.5
+            else:
+                info['discrete_penalty'] = 0.0
         self.last_gripper_pos = self.env.unwrapped.curr_gripper_joints
         
         return observation, reward, terminated, truncated, info

@@ -9,19 +9,19 @@ import cv2
 import copy     
 from scipy.spatial.transform import Rotation
 import time
-from typing import Dict
+from typing import Dict, Tuple, Optional, Union, Any, List
 from pathlib import Path
 
 
 from rl_envs.xrocs.core.config_loader import ConfigLoader
 from rl_envs.xrocs.core.station_loader import StationLoader
-
+from rl_envs.shared_state import shared_state
 
 
 ##############################################################################
 import traceback
 import sys
-from rl_envs.shared_state import shared_state
+from rl.env.shared_state import shared_state
 
 def decoder_image(camera_rgb_images, camera_depth_images, bgr2rgb=False):
     if type(camera_rgb_images[0]) is np.uint8:
@@ -52,7 +52,7 @@ def decoder_image(camera_rgb_images, camera_depth_images, bgr2rgb=False):
         rgb_images = np.asarray(rgb_images)
         depth_images = np.asarray(depth_images)
         return rgb_images, depth_images
-    
+
 def print_green(x):
     return print("\033[92m {}\033[00m".format(x))
 
@@ -60,14 +60,19 @@ def print_green(x):
 class BaseEnv(gym.Env):
     def __init__(
         self,
-        fake_env=False,
-        config=None,
+        fake_env = False,
+        config = None,
     ):
         self.config = config
         self._gripper_sleep = config.gripper_sleep
         self.joint_dim = config.joint_dim
-        self._reset_joint = np.array(config.reset_joint)[0:self.joint_dim]
-        # self._reset_pose = np.array(config.target_pose)
+        self.gripper_dim = config.gripper_dim
+        self.dual_arm = config.dual_arm
+
+        if self.dual_arm:
+            self._reset_joint = {name: np.array(config.reset_joint[name])[0:self.joint_dim] for name in config.reset_joint.keys()}
+        else:
+            self._reset_joint = np.array(config.reset_joint)[0:self.joint_dim]
         self._random_xy_range = config.random_xy_range
         self._random_rz_range = config.random_rz_range
         self._random_reset = config.random_reset
@@ -80,28 +85,41 @@ class BaseEnv(gym.Env):
         self.close_gripper = config.close_gripper
         self.fix_gripper = config.fix_gripper
         self.ego_mode = config.ego_mode
+        self.use_cmd_pose = config.use_cmd_pose
+        
         assert self.control_mode in ["joint", "pose"], f'Not valid control mode: {self.control_mode}'
         
         self.fake_env = fake_env
         self.hz = config.hz
 
         image_resize = config.image_resize
-
+        tcp_pose_dim = 7  # 末端执行器位姿：xyz 位置(3) + 四元数旋转(4) = 7维
+        if self.dual_arm:
+            tcp_pose_dim = 2 * tcp_pose_dim  # 双臂，每臂7维
+        
+        gripper_dim = self.gripper_dim
+        if self.dual_arm:
+            gripper_dim = 2 * gripper_dim
+        
+        joint_dim = self.joint_dim
+        if self.dual_arm:
+            joint_dim = 2 * joint_dim
+        
         state_dict = {
-                        "tcp_pose": gym.spaces.Box(
-                            -np.inf, np.inf, shape=(7,)
-                        ),  # xyz + quat
-                        "gripper_pose": gym.spaces.Box(0, 1, shape=(1,)),
-                        "joints": gym.spaces.Box(
-                            -np.inf, np.inf, shape=(self.joint_dim,)
-                        ),
-                        "ee_force": gym.spaces.Box(
-                            -np.inf, np.inf, shape=(6,)
-                        ),
-                        "arm_force": gym.spaces.Box(
-                            -np.inf, np.inf, shape=(7,)
-                        ),
-                    }
+            "tcp_pose": gym.spaces.Box(
+                -np.inf, np.inf, shape=(tcp_pose_dim,)
+            ),  
+            "gripper_pose": gym.spaces.Box(0, 1, shape=(gripper_dim,)),  # 夹爪开合度：0=完全打开，1=完全关闭
+            "joints": gym.spaces.Box(
+                -np.inf, np.inf, shape=(joint_dim,)
+            ),
+            # "ee_force": gym.spaces.Box(
+            #     -np.inf, np.inf, shape=(6,)
+            # ),  # 末端执行器力/力矩：6维（3个力 + 3个力矩）
+            # "arm_force": gym.spaces.Box(
+            #     -np.inf, np.inf, shape=(self.joint_dim,)
+            # ),
+        }
 
         self.observation_space = gym.spaces.Dict(
             {
@@ -114,15 +132,27 @@ class BaseEnv(gym.Env):
         )
 
         
+        # if self.control_mode == "pose":
+        #     self.action_space = gym.spaces.Box(
+        #         np.array([-1, -1, -1, -1, -1, -1, 0], dtype=np.float32),
+        #         np.array([1, 1, 1, 1, 1, 1, 1], dtype=np.float32),
+        #     )
+        # else:
+        #     self.action_space = gym.spaces.Box(-np.inf, np.inf, shape=(self.joint_dim + 1,))
+        
         if self.control_mode == "pose":
-            # Action/Observation Space: action_space = (xyz + rpy + gripper)
-            self.action_space = gym.spaces.Box(
-                np.array([-1, -1, -1, -1, -1, -1, 0], dtype=np.float32),
-                np.array([1, 1, 1, 1, 1, 1, 1], dtype=np.float32),
-            )
+            if self.dual_arm:
+                self.action_space = gym.spaces.Box( 
+                    np.array([-1, -1, -1, -1, -1, -1, 0, -1, -1, -1, -1, -1, -1, 0], dtype=np.float32),
+                    np.array([1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1], dtype=np.float32),
+                )
+            else:
+                self.action_space = gym.spaces.Box(
+                    np.array([-1, -1, -1, -1, -1, -1, 0], dtype=np.float32),
+                    np.array([1, 1, 1, 1, 1, 1, 1], dtype=np.float32),
+                )
         else:
-            self.action_space = gym.spaces.Box(-np.inf, np.inf, shape=(self.joint_dim + 1,))
-
+            self.action_space = gym.spaces.Box(-np.inf, np.inf, shape=(joint_dim + gripper_dim,))
 
         if fake_env:
             print_green("fake env : not connect to robot")
@@ -137,14 +167,42 @@ class BaseEnv(gym.Env):
         station_loader = StationLoader(self.cfg_dict)
         self.robot_station = station_loader.generate_station_handle()
         self.robot_station.connect()
+
+        if "tienkung" in self.robot_type:
+            robot = self.robot_station.get_robot_handle()["robot"]
+            self.ros2controller = robot.ros2controller
+            self.ros2controller.set_arm_enable(True)
+            self.ros2controller.set_arm_mode(3)
+            self.left_gripper = self.robot_station.get_gripper_handle()["left"]
+            self.right_gripper = self.robot_station.get_gripper_handle()["right"]
+
         self._update_currpos()
+
+        
         self.last_gripper_act = time.time()
 
-        self.xyz_bounding_box = gym.spaces.Box(
-            np.array(config.abs_pose_limit_low[:3]),
-            np.array(config.abs_pose_limit_high[:3]),
-            dtype=np.float64,
-        )
+        if self.dual_arm:
+            xyz_limits = {}
+
+            for arm_name in config.abs_pose_limit_low.keys():
+                low_vals = np.array(config.abs_pose_limit_low[arm_name])
+                high_vals = np.array(config.abs_pose_limit_high[arm_name])
+
+                # XYZ limits (前3维)
+                xyz_limits[arm_name] = gym.spaces.Box(
+                    low=low_vals[:3],
+                    high=high_vals[:3],
+                    dtype=np.float64
+                )
+
+
+            self.xyz_bounding_box = gym.spaces.Dict(xyz_limits)
+        else:
+            self.xyz_bounding_box = gym.spaces.Box(
+                np.array(config.abs_pose_limit_low[:3]),
+                np.array(config.abs_pose_limit_high[:3]),
+                dtype=np.float64,
+            )
         
         
         self.image_crop = {}
@@ -163,18 +221,31 @@ class BaseEnv(gym.Env):
                             return lambda img: img
                     
                     self.image_crop[camera_key] = make_crop_func(crop_func)
-        self.save_path = None
-        self.save_frame = False
-        self.obs_pre = None
-        self.last_gripper_value = 1.0 if self.close_gripper else 0.0
+        # self.save_path = None
+        # self.save_frame = False
+        # self.obs_pre = None
+
+        if self.dual_arm:
+            self.last_gripper_value = {
+                "left": 1.0 if self.close_gripper else 0.0,
+                "right": 1.0 if self.close_gripper else 0.0,
+            }
+        else:
+            self.last_gripper_value = 1.0 if self.close_gripper else 0.0
+        self.last_gripper_act = time.time()  # 重置夹爪动作时间
 
 
-
-    def clip_safety_box(self, pose: np.ndarray) -> np.ndarray:
+    def clip_safety_box(self, pose: np.ndarray, arm_name: str=None) -> np.ndarray:
         """Clip the pose to be within the safety box."""
-        pose[:3] = np.clip(
-            pose[:3], self.xyz_bounding_box.low, self.xyz_bounding_box.high
-        )
+        if self.dual_arm and arm_name is not None:
+            xyz_bounding_box = self.xyz_bounding_box[arm_name]
+            pose[:3] = np.clip(
+                pose[:3], xyz_bounding_box.low, xyz_bounding_box.high
+            )
+        else:
+            pose[3:] = np.clip(
+                pose[3:], self.xyz_bounding_box.low, self.xyz_bounding_box.high
+            )
         return pose
 
     def pose_quat2euler(self, pose):
@@ -182,9 +253,18 @@ class BaseEnv(gym.Env):
         pose_euler = Rotation.from_quat(pose_quat).as_euler("xyz")
         pose = np.hstack([pose_t, pose_euler])
         return pose
+
+    def pose_euler2quat(self, pose):
+        pose_t, pose_euler = pose[0:3], pose[3:6]
+        pose_quat = Rotation.from_euler("xyz", pose_euler).as_quat(canonical=True)
+        pose = np.hstack([pose_t, pose_quat])
+        return pose
     
 
     def get_xtele(self) -> dict:
+        """
+        获取遥操作设备状态
+        """
         if 'ur' in self.robot_type:
             self.tele_agent.switch_act()
             joints = self.tele_agent.act()
@@ -206,23 +286,61 @@ class BaseEnv(gym.Env):
                 'pose': xtele_ee_pose,
             }
             return recv
+        elif "tienkung" in self.robot_type:
+            # 获取xtele的值
+            self.tele_agent.exit_any_sync(0)
+            # [0:7]: left arm joints [7]: left gripper, [8:15]: right arm joints [15]: right gripper
+
+            joints = self.tele_agent.act()
+
+
+            pin_kine = self.robot_station._robot_dict.get("robot").pin_kine
+            l_tcp_pose = pin_kine.get_left_tcp_pose(joints[0:7])
+            r_tcp_pose = pin_kine.get_right_tcp_pose(joints[8:15])
+
+
+            joints = {
+                'left': joints[0:8],
+                'right': joints[8:16]
+            }
+
+            xtele_ee_pose = {
+                'left': l_tcp_pose.get_xyz_m_xyzw_ndarray(),
+                'right': r_tcp_pose.get_xyz_m_xyzw_ndarray()
+            }
+
+            recv = {
+                'joints': joints,
+                'pose': xtele_ee_pose,
+            }
+
+            return recv
         else:
             raise NotImplementedError("Unknown robot type")
 
     def init_xtele(self,):
-        if 'ur' in self.robot_type or 'franka' in self.robot_type:
+        """
+        初始化遥操作模块
+        """
+        if 'ur' in self.robot_type or 'franka' in self.robot_type or "tienkung" in self.robot_type:
             from xtele.core.integrate_module import TeleCore
             self.tele_agent = TeleCore()
         else:   
             raise NotImplementedError("Unknown robot type")
 
     def sync_xtele(self, timeout: float = 5):
-        goal = np.append(self.curr_arm_joints, self.curr_gripper_joints)
+        """
+        同步机器人状态到遥操作设备
+        """
 
         if 'ur' in self.robot_type:
+            goal = np.append(self.curr_arm_joints, self.curr_gripper_joints)
+
             self.tele_agent.switch_reverse()
             self.tele_agent.sync_position(goal)
         elif 'franka' in self.robot_type:
+            goal = np.append(self.curr_arm_joints, self.curr_gripper_joints)
+            
             need_torque = False
             tele_cur_joints = self.tele_agent.act()
             tele_tar_joints = goal
@@ -235,13 +353,54 @@ class BaseEnv(gym.Env):
                 self.tele_agent.sync_position_torque(p)
                 time.sleep(0.02)
 
+        elif "tienkung" in self.robot_type:
+            goal = []
+            
+            for name in self.curr_arm_joints.keys():
+                arm_joints = self.curr_arm_joints[name]
+                hand_joints = self.curr_gripper_joints[name]
+
+                goal = goal + list(arm_joints)
+                goal.append(hand_joints)
+            self.tele_agent.set_position(goal)
         else:
             raise NotImplementedError("Unknown robot type")    
 
-    def step(self, action: np.ndarray) -> tuple:
-        """standard gym step function."""
+    def compute_next_pose(self, curr_pose, delta_action) -> np.ndarray:
+        '''
+        input:
+            curr_pose: np.ndarray, shape: (7,) x,y,z, quat_x, quat_y, quat_z, quat_w
+            delta_action: np.ndarray, shape: (7,) x,y,z, r, p, y, gripper
+        output:
+            next_pose: np.ndarray, shape: (7,) x, y, z, r, p, y, gripper
+        '''
         
-        start_time = time.time()
+        curr_pose_t, curr_pose_quat = curr_pose[0:3], curr_pose[3:7]
+        curr_mat = np.eye(4)
+        curr_mat[:3, :3] = Rotation.from_quat(curr_pose_quat).as_matrix()
+        curr_mat[:3, 3] = curr_pose_t
+        
+        delta_t = delta_action[0:3] * self.action_scale[0]
+        delta_euler = delta_action[3:6] * self.action_scale[1]
+        delta_mat = np.eye(4)  # 4x4 齐次变换矩阵
+        delta_mat[:3, :3] = Rotation.from_euler("xyz", delta_euler).as_matrix()  # 旋转矩阵
+        delta_mat[:3, 3] = delta_t  # 平移部分
+        
+        tar_mat = curr_mat @ delta_mat
+        
+        tar_t = tar_mat[:3,3]
+        tar_euler = Rotation.from_matrix(tar_mat[:3, :3]).as_euler("xyz")
+        tar_gripper = delta_action[-1] * self.action_scale[2]
+        
+        next_pose = np.hstack([tar_t, tar_euler, tar_gripper])
+        return next_pose
+    
+    def step(self, action: np.ndarray) -> Tuple[Dict[str, Any], int, bool, bool, Dict[str, Any]]:
+        # ========== 控制执行频率 ==========
+        start_time = time.time()  # 记录开始时间
+        
+        # 夹爪动作需要一定时间完成，频繁控制可能导致问题
+        # 如果距离上次夹爪动作超过 _gripper_sleep 秒，且未固定夹爪，则允许控制夹爪
         if (time.time() - self.last_gripper_act > self._gripper_sleep) and not self.fix_gripper:
             include_gripper = True
         else:
@@ -249,39 +408,37 @@ class BaseEnv(gym.Env):
 
         if self.control_mode == "joint":
             obs = self._send_joint_command(action, include_gripper) 
-            curr_pose_euler = None
+            # curr_pose_euler = None
         elif self.control_mode == "pose":
             action = action.clip(-1, 1)
-            
-            action_t = action[0:3] * self.action_scale[0]
-            action_euler = action[3:6] * self.action_scale[1]
+            if self.dual_arm:
+                if "tienkung" in self.robot_type:
+                    next_pose = {}
+                    dual_arm_action = {
+                        "left": action[0:7],
+                        "right": action[7:14],
+                    }
 
-            
-            # Action transformation matrix
-            action_mat = Rotation.from_euler("xyz", action_euler).as_matrix()
-            action_pose = np.eye(4)
-            action_pose[:3, :3] = action_mat
-            action_pose[:3, 3] = action_t
+                    for name, action in dual_arm_action.items():
+                        curr_pose = self.currpos[name]
+                        next_pose[name] = self.compute_next_pose(curr_pose, action)
 
-            # 当前位置的变换矩阵
-            currpos_pose = np.eye(4)
-            currpos_mat = Rotation.from_quat(self.currpos[3:]).as_matrix()
-            currpos_pose[:3, :3] = currpos_mat
-            currpos_pose[:3, 3] = self.currpos[:3]
-            
-            # Calculate the new target pose (current pose × action transformation)
-            tar_pose_new = currpos_pose @ action_pose
-            # 计算新的目标位姿的欧拉角
-            tar_euler_new = Rotation.from_matrix(tar_pose_new[:3, :3]).as_euler("xyz")
-            
-            # Calculate the current pose's euler angle
-            cur_euler = self.pose_quat2euler(self.currpos)  
+                        # 裁剪到安全边界
+                        next_pose[name] = self.clip_safety_box(next_pose[name], arm_name=name)  
 
-            # Calculate the new target pose (position + euler angle + gripper)
-            next_pos = np.hstack([tar_pose_new[:3,3], tar_euler_new, action[-1] * self.action_scale[2]])
-            next_pos = self.clip_safety_box(next_pos)
-            obs = self._send_pos_command(next_pos, include_gripper) 
-            curr_pose_euler = self.pose_quat2euler(obs['arm_pose']['single'])
+                    self.currpos = {name: self.pose_euler2quat(pose) for name, pose in next_pose.items()}
+                else:
+                    raise NotImplementedError("Unknown robot type")
+                
+            
+            else:
+                next_pose = self.compute_next_pose(self.currpos, action)
+                next_pose = self.clip_safety_box(next_pose)
+                self.currpos = self.pose_euler2quat(next_pose)
+
+            obs = self._send_pos_command(next_pose, include_gripper) 
+
+            # curr_pose_euler = self.pose_quat2euler(obs['arm_pose']['single'])
         else:
             raise NotImplementedError(f"Not valid control mode: {self.control_mode}")
 
@@ -294,20 +451,31 @@ class BaseEnv(gym.Env):
         end_time = time.time()
         sleep_time = max(0, 1/self.hz - (end_time - start_time))
         time.sleep(sleep_time)
-        obs = self._get_obs()
+
+        if self.use_cmd_pose:
+            obs = self._get_obs()
+        else:
+            obs = self._get_obs(update=False)
         
         reward = 0.0
         terminated = False
         truncated = self.curr_path_length >= self.max_episode_length
-        return obs, int(reward), terminated, truncated, {"succeed": terminated, "curr_pose_euler": curr_pose_euler, "is_intervention": False}
+        # return obs, int(reward), terminated, truncated, {"succeed": terminated, "curr_pose_euler": curr_pose_euler, "is_intervention": False}
+        return obs, int(reward), terminated, truncated, {"success": False, "is_intervention": False}
 
 
     def reset(self, **kwargs):
         self.last_gripper_act = time.time()
+        if self.dual_arm:
+            self.last_gripper_value = {
+                "left": 1.0 if self.close_gripper else 0.0,
+                "right": 1.0 if self.close_gripper else 0.0,
+            }
+        else:
+            self.last_gripper_value = 1.0 if self.close_gripper else 0.0
+
         if self.ego_mode:
             
-            # provide intervention and reset from the only one person in the scene
-            self.last_gripper_value = 1.0 if self.close_gripper else 0.0
             self.sync_xtele()
             while True:
                 try:
@@ -318,6 +486,7 @@ class BaseEnv(gym.Env):
                     traceback.print_exc()
                     time.sleep(1)
                     continue  
+
             shared_state.terminate = False
             print("Reset the scene, press Space to continue...")
             while not shared_state.terminate:
@@ -327,22 +496,26 @@ class BaseEnv(gym.Env):
                 target_joint = xtele_joints.copy()
                 self._send_joint_command(target_joint, include_gripper=True)
                 time.sleep(1 / self.hz)
-            shared_state.terminate = False
-            print('go to reset!!!!!!!!!!')
-            self.go_to_reset(joint_reset=True)    
-        else:
-            self.go_to_reset(joint_reset=True)      
-            shared_state.terminate = False
-            # print("重新摆放场景, 按空格继续: ")
-            print("Reset the scene, press Space to continue...")
-            while not shared_state.terminate:
-                continue
-            shared_state.terminate = False
+
+        print('go to reset!!!!!!!!!!')
+        self.go_to_reset(joint_reset=True)      
+        shared_state.terminate = False
+        # print("重新摆放场景, 按空格继续: ")
+        print("Reset the scene, press Space to continue...")
+        while not shared_state.terminate:
+            continue
+        shared_state.terminate = False
 
         self.curr_path_length = 0
         self.last_gripper_act = time.time()
-        self.last_gripper_value = 1.0 if self.close_gripper else 0.0
-        obs = self._get_obs(obs=None)
+        if self.dual_arm:
+            self.last_gripper_value = {
+                "left": 1.0 if self.close_gripper else 0.0,
+                "right": 1.0 if self.close_gripper else 0.0,
+            }
+        else:
+            self.last_gripper_value = 1.0 if self.close_gripper else 0.0
+        obs = self._get_obs()
         return obs, {"success": False, "is_intervention": False}
 
 
@@ -353,129 +526,263 @@ class BaseEnv(gym.Env):
         """        
         # perform joint reset if needed
         self._update_currpos()
-        curr_pose = self.currpos.copy()
-        curr_pose = self.pose_quat2euler(curr_pose)
-        # reset_pose = self._reset_pose.copy()
-
-        # if np.linalg.norm(curr_pose - reset_pose) > 0.15 or joint_reset:
-        assert self._reset_joint.shape == (self.joint_dim,)
-        # if "ur" in self.robot_type:
-        #     arm_joints = np.append(self.curr_arm_joints, self.last_gripper_value)
-        #     for _ in range(5):
-        #         self._send_joint_command(arm_joints, include_gripper=False)
-        #         time.sleep(1 / self.hz)
+        if self.dual_arm:
+            if "tienkung" in self.robot_type:
+                # 提取左右臂的重置关节目标
+                goal_joints_left = self._reset_joint["left"].copy()
+                goal_joints_right = self._reset_joint["right"].copy()
                 
-        #     for name, _robot in self.robot_station.get_robot_handle().items():
-        #         goal_joints = Joints(self._reset_joint, num_of_dofs=self.joint_dim)
-        #         try:
-        #             return_val =_robot.reach_target_joint(goal_joints)
-        #         except Exception as e:
-        #             print(f"Error in reach_target_joint: {e}")
-        #     for _ in range(5):
-        #         self._send_joint_command(self._reset_joint, include_gripper=False)
-        #         time.sleep(1 / self.hz)
-        # else:
-        goal_joints = self._reset_joint.copy()
-        # Combine the current joints and gripper position 
-        curr_joints = np.concatenate([self.curr_arm_joints, np.array([self.curr_gripper_joints])])
-        # Combine the target joints and gripper position
-        goal_joints = np.concatenate([goal_joints, np.array([self.last_gripper_value])])
-        cnt = int(3 / (1 / self.hz))
-        # Generate a linear interpolation path from the current joints to the target joints (smooth transition)
-        path = np.linspace(curr_joints, goal_joints, cnt)
-        for p in path:
-            self._send_joint_command(p, include_gripper=False)
-            time.sleep(1 / self.hz)
+                assert len(goal_joints_left) == self.joint_dim, f"左臂重置关节维度错误，期望{self.joint_dim}，实际{len(goal_joints_left)}"
+                assert len(goal_joints_right) == self.joint_dim, f"右臂重置关节维度错误，期望{self.joint_dim}，实际{len(goal_joints_right)}"
+                
+                # 拼接当前关节+夹爪
+                curr_joints_left = np.concatenate([
+                    self.curr_arm_joints["left"], np.array([self.curr_gripper_joints["left"]])
+                ])
+                curr_joints_right = np.concatenate([
+                    self.curr_arm_joints["right"], np.array([self.curr_gripper_joints["right"]])
+                ])
+                
+                # 拼接目标关节+夹爪
+                goal_joints_left = np.concatenate([goal_joints_left, np.array([self.last_gripper_value])])
+                goal_joints_right = np.concatenate([goal_joints_right, np.array([self.last_gripper_value])])
+                
+                cnt = int(3 / (1 / self.hz))
+                path_left = np.linspace(curr_joints_left, goal_joints_left, cnt)
+                path_right = np.linspace(curr_joints_right, goal_joints_right, cnt)
+                
+                for p_left, p_right in zip(path_left, path_right):
+                    joint_cmd = {
+                        "left": p_left,
+                        "right": p_right
+                    }
+                    self._send_joint_command(joint_cmd, include_gripper=False)
+                    time.sleep(1 / self.hz)
 
-        self._update_currpos()
-        curr_pose = self.currpos.copy()
-        curr_pose = self.pose_quat2euler(curr_pose)
-        
-        # If random reset is enabled, add random perturbations to the xy plane and rotation angle
-        if self._random_reset:  
-            reset_pose = curr_pose.copy()
-            # Add random offset to the xy plane
-            reset_pose[:2] += np.random.uniform(
-                -self._random_xy_range, self._random_xy_range, (2,)
-            )
-            # 获取旋转角
-            axis_random = np.array(reset_pose[3:])
-            assert axis_random.shape == (3,)
-            # 在Z轴旋转角上添加随机扰动
-            axis_random[-1] += np.random.uniform(
-                -self._random_rz_range, self._random_rz_range
-            )
-            reset_pose[3:] = axis_random
-            cnt = int(1 / (1 / self.hz))
-            path = np.linspace(curr_pose, reset_pose, cnt)
+                self._update_currpos()
+                curr_pose = self.currpos.copy()
+
+                # If random reset is enabled, add random perturbations to the xy plane and rotation angle
+                if self._random_reset:
+                    reset_pose = {}
+                    path = {}
+                    for name, pose in curr_pose.items():
+                        single_curr_pose = self.pose_quat2euler(pose)
+                        single_reset_pose = reset_pose.copy()
+                        # 在xy平面上添加随机偏移
+                        single_reset_pose[:2] += np.random.uniform(
+                            -self._random_xy_range, self._random_xy_range, (2,)
+                        )
+                        # 获取旋转角
+                        axis_random = np.array(reset_pose[3:])
+                        assert axis_random.shape == (3,)
+                        # 在Z轴旋转角上添加随机扰动
+                        axis_random[-1] += np.random.uniform(
+                            -self._random_rz_range, self._random_rz_range
+                        )
+                        single_reset_pose[3:] = axis_random
+                        reset_pose[name] = single_reset_pose
+                        
+                        cnt = int(1 / (1 / self.hz))
+                        path[name] = np.linspace(single_curr_pose, single_reset_pose, cnt)
+                
+                    for p_left, p_right in zip(path["left"], path["right"]):
+                        pose_cmd = {
+                            "left": p_left,
+                            "right": p_right
+                        }
+                        self._send_pos_command(pose_cmd, include_gripper=False)
+                        time.sleep(1 / self.hz)   
+            
+            else:
+                raise NotImplementedError("Unknown robot type")
+        else:
+
+            curr_pose = self.currpos.copy()
+            curr_pose = self.pose_quat2euler(curr_pose)
+
+            assert self._reset_joint.shape == (self.joint_dim,)
+            
+            goal_joints = self._reset_joint.copy()
+            # Combine the current joints and gripper position 
+            curr_joints = np.concatenate([self.curr_arm_joints, np.array([self.curr_gripper_joints])])
+            # Combine the target joints and gripper position
+            goal_joints = np.concatenate([goal_joints, np.array([self.last_gripper_value])])
+            cnt = int(3 / (1 / self.hz))
+            # Generate a linear interpolation path from the current joints to the target joints (smooth transition)
+            path = np.linspace(curr_joints, goal_joints, cnt)
+            for p in path:
+                self._send_joint_command(p, include_gripper=False)
+                time.sleep(1 / self.hz)
+
+            self._update_currpos()
+            curr_pose = self.currpos.copy()
+
+            # If random reset is enabled, add random perturbations to the xy plane and rotation angle
+            if self._random_reset:
+                curr_pose = self.pose_quat2euler(curr_pose)
+                reset_pose = curr_pose.copy()
+                # 在xy平面上添加随机偏移
+                reset_pose[:2] += np.random.uniform(
+                    -self._random_xy_range, self._random_xy_range, (2,)
+                )
+                # 获取旋转角
+                axis_random = np.array(reset_pose[3:])
+                assert axis_random.shape == (3,)
+                # 在Z轴旋转角上添加随机扰动
+                axis_random[-1] += np.random.uniform(
+                    -self._random_rz_range, self._random_rz_range
+                )
+                reset_pose[3:] = axis_random
+
+                cnt = int(1 / (1 / self.hz))
+                path = np.linspace(curr_pose, reset_pose, cnt)
+
             for p in path:
                 self._send_pos_command(p, include_gripper=False)
                 time.sleep(1 / self.hz)
 
 
     def _send_joint_command(self, joints: np.ndarray, include_gripper=False):
-        gripper_value = joints[-1] if include_gripper else self.last_gripper_value
-        gripper_value_binary = 1.0 if gripper_value >= 0.5 else 0.0
-        if include_gripper:
-            self.last_gripper_value = gripper_value_binary
-        if "ur" in self.robot_type:
-            robot_target = {
-                "arm_joints": {
-                    "single": joints[0:self.joint_dim]
-                },
-                "hand_joints": {"single": self.last_gripper_value}
+        if self.dual_arm:
+            '''
+            joints = {
+                "left": np.zeros(self.joint_dim+self.gripper_dim),
+                "right": np.zeros(self.joint_dim+self.gripper_dim),
             }
-            obs = self.robot_station.step(robot_target)
-            return obs
-        elif "franka" in self.robot_type:
-            robot_target = {
-                "arm": {
-                    "position": {
-                        "single": np.append(joints[0:self.joint_dim], self.last_gripper_value),
+            '''
+            if "tienkung" in self.robot_type:
+                for name in joints.keys():
+                    if name == "left":
+                        if include_gripper:
+                            target_gripper = [joints[name][-1]]
+                        else:
+                            target_gripper = [0.0]
+                        print("exec_jointspace_arm_L_controller")
+                        self.ros2controller.exec_jointspace_arm_L_controller(target=joints[name].tolist()[0:self.joint_dim])
+                        self.left_gripper.sync_target_joint(target_gripper)
+                    else:
+                        if include_gripper:
+                            target_gripper = [joints[name][-1]]
+                        else:
+                            target_gripper = [0.0]
+                        print("exec_jointspace_arm_R_controller")
+                        self.ros2controller.exec_jointspace_arm_R_controller(target=joints[name].tolist()[0:self.joint_dim])
+                        self.right_gripper.sync_target_joint(target_gripper)
+                return None
+            else:
+                raise NotImplementedError("Unknown robot type")
+        else:
+            gripper_value = joints[-1] if include_gripper else self.last_gripper_value
+            gripper_value_binary = 1.0 if gripper_value >= 0.5 else 0.0
+            if include_gripper:
+                self.last_gripper_value = gripper_value_binary
+            if "ur" in self.robot_type:
+                robot_target = {
+                    "arm_joints": {
+                        "single": joints[0:self.joint_dim]
+                    },
+                    "hand_joints": {"single": self.last_gripper_value}
+                }
+                obs = self.robot_station.step(robot_target)
+                return obs
+            elif "franka" in self.robot_type:
+                robot_target = {
+                    "arm": {
+                        "position": {
+                            "single": np.append(joints[0:self.joint_dim], self.last_gripper_value),
+                        }
                     }
                 }
-            }
-            obs = self.robot_station.step(robot_target)
-            return obs
-        else:
-            raise NotImplementedError("Unknown robot type")
+                obs = self.robot_station.step(robot_target)
+                return obs
+            else:
+                raise NotImplementedError("Unknown robot type")
 
 
     def _send_pos_command(self, pose: np.ndarray, include_gripper=False):
-        if include_gripper:
-            gripper_value_binary = 1.0 if pose[-1] >= 0.5 else 0.0
-            self.last_gripper_value = gripper_value_binary
+        if self.dual_arm:
+            '''
+            pose = {
+                "left": np.zeros(6 + self.gripper_dim),
+                "right": np.zeros(6 + self.gripper_dim),
+            }
+            '''
+            if "tienkung" in self.robot_type:
+                """
+                question: tienkung传递的是四元数？
+                """
+                for name in pose.keys():
+                    target_pose = self.pose_euler2quat(pose[name])
+                    if include_gripper:
+                        target_gripper = [pose[name][-1]]
 
-        if "ur" in self.robot_type:
-            robot_target = {
-                "arm_pose": {
-                    "single": pose[0:6]
-                },
-                "hand_joints": {"single": self.last_gripper_value}
-            }
-            obs = self.robot_station.step_ee(robot_target)
-        elif "franka" in self.robot_type:
-            arm_pose = np.append(pose[0:6], self.last_gripper_value)
-            robot_target = {
-                "arm_pose": {
-                    "single": arm_pose
-                },
-                "hand_joints": {}
-            }
+                        self.last_gripper_value[name] = 1.0 if target_gripper[0] >= 0.5 else 0.0
+                    else:   
+                        target_gripper = [self.last_gripper_value[name]]
+                    if name == "left":
+                        self.ros2controller.exec_endpose_single_arm_qp_L_controller(from_frame="waist_yaw_link", to_frame="left_tcp_link", target=target_pose.tolist(), offset=[0.0, 0.0, 0.0])
+                        self.left_gripper.sync_target_joint(target_gripper)
+                    else:
+                        self.ros2controller.exec_endpose_single_arm_qp_R_controller(from_frame="waist_yaw_link", to_frame="right_tcp_link", target=target_pose.tolist(), offset=[0.0, 0.0, 0.0])
+                        self.right_gripper.sync_target_joint(target_gripper)
+
+                return None
+
+            else:
+                raise NotImplementedError("Unknown robot type")
         else:
-            raise NotImplementedError("Unknown robot type")
+
+            """
+            pose = np.zeros(6 + self.gripper_dim)
+
+            question: ur传给step_ee是欧拉角？franka没有step_ee接口？
+            """
+            if include_gripper:
+                gripper_value_binary = 1.0 if pose[-1] >= 0.5 else 0.0
+                self.last_gripper_value = gripper_value_binary
+
+            if "ur" in self.robot_type:
+                robot_target = {
+                    "arm_pose": {
+                        "single": pose[0:6]
+                    },
+                    "hand_joints": {"single": self.last_gripper_value}
+                }
+                obs = self.robot_station.step_ee(robot_target)
+            elif "franka" in self.robot_type:
+                arm_pose = np.append(pose[0:6], self.last_gripper_value)
+                robot_target = {
+                    "arm_pose": {
+                        "single": arm_pose
+                    },
+                    "hand_joints": {}
+                }
+            else:
+                raise NotImplementedError("Unknown robot type")
         return obs
 
 
-    def _update_currpos(self, obs=None):
+    def _update_currpos(self, obs=None, update=True):
         """
         Internal function to get the latest state of the robot and its gripper.
         """
         if obs is None:
             obs = self._get_obs_from_robot()
-        self.currpos = obs["arm_pose"]['single']
-        self.curr_gripper_joints = np.array(obs["hand_joints"]['single']).squeeze()
-        self.curr_arm_joints = np.array(obs["arm_joints"]['single'][0:self.joint_dim])
+        if self.dual_arm:
+            if "tienkung" in self.robot_type:
+                if update:
+                    self.currpos = obs["arm_pose"]
+                self.curr_gripper_joints = obs["hand_joints"]
+                self.curr_arm_joints = obs["arm_joints"]
+                
+            else:
+                raise NotImplementedError("Unknown robot type")
+        else:
+            if update:
+                self.currpos = obs["arm_pose"]['single']
+            self.curr_gripper_joints = np.array(obs["hand_joints"]['single']).squeeze()
+            self.curr_arm_joints = np.array(obs["arm_joints"]['single'][0:self.joint_dim])
         return obs
 
     def _get_obs(self, obs=None) -> dict:
@@ -483,11 +790,8 @@ class BaseEnv(gym.Env):
             images = self.get_fake_im()
             state_observation = self.get_fake_pose()
         else:
-            if obs is None:
-                obs = self._get_obs_from_robot()
-            self.currpos = obs["arm_pose"]['single']
-            self.curr_gripper_joints = np.array(obs["hand_joints"]['single']).squeeze()
-            self.curr_arm_joints = np.array(obs["arm_joints"]['single'][0:self.joint_dim])
+            obs = self._update_currpos(obs)
+
             images = {}
             for key, cap in obs["images"].items():
                 if key not in self._image_keys:
@@ -496,24 +800,69 @@ class BaseEnv(gym.Env):
                 images[key] = rgb 
                 if not os.path.exists(f"online_image_{key}.png"):
                     cv2.imwrite(f"online_image_{key}.png", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
-            state_observation = {
-                "tcp_pose": self.currpos,
-                "gripper_pose": self.curr_gripper_joints,
-                "joints": self.curr_arm_joints,
-            }
+            if self.dual_arm:
+                if "tienkung" in self.robot_type:
+                    state_observation = {
+                        "tcp_pose": self._flatten(self.currpos),
+                        "gripper_pose": self._flatten(self.curr_gripper_joints),
+                        "joints": self._flatten(self.curr_arm_joints),
+                    }
 
+                else:
+                    raise NotImplementedError("Unknown robot type") 
+            else:
+                state_observation = {
+                    "tcp_pose": self.currpos,
+                    "gripper_pose": self.curr_gripper_joints,
+                    "joints": self.curr_arm_joints,
+                }
             
         return dict(images=images, state=state_observation)
 
+
     def _get_obs_from_robot(self) -> dict:
         obs = self.robot_station.get_obs()
-        # standardize arm_pose
-        arm_pose = obs['arm_pose']['single']
-        arm_pose_t, arm_pose_quat = arm_pose[0:3], arm_pose[3:]
-        arm_pose_quat = Rotation.from_quat(arm_pose_quat).as_quat(canonical=True)
-        arm_pose = np.hstack([arm_pose_t, arm_pose_quat])
-        obs['arm_pose'] = {'single': arm_pose}
+        if self.dual_arm:
+            if "tienkung" in self.robot_type:
+                arm_pose = obs["arm_pose"]
+                arm_pose_t = {name: arm_pose[name][0:3] for name in arm_pose}
+                arm_pose_quat = {name: arm_pose[name][3:] for name in arm_pose}
+                arm_pose_quat = {name: Rotation.from_quat(arm_pose_quat[name]).as_quat(canonical=True) for name in arm_pose_quat}
+                arm_pose = {name: np.hstack([arm_pose_t[name], arm_pose_quat[name]]) for name in arm_pose}
+                obs["arm_pose"] = arm_pose
+                obs["hand_joints"] = self._transform_hand_joints(obs["hand_joints"])
+            else:
+                raise NotImplementedError("Unknown robot type")
+        else:
+            arm_pose = obs['arm_pose']['single']
+            arm_pose_t, arm_pose_quat = arm_pose[0:3], arm_pose[3:]
+            arm_pose_quat = Rotation.from_quat(arm_pose_quat).as_quat(canonical=True)
+            arm_pose = np.hstack([arm_pose_t, arm_pose_quat])
+            obs['arm_pose'] = {'single': arm_pose}
         return obs
+
+    def _flatten(self, input_dict: Dict[str, Any]) -> np.ndarray:
+        flattened_values = []
+        for key in input_dict.keys():
+            value = input_dict[key]
+            flattened_values.append(np.array(value).flatten())
+        return np.concatenate(flattened_values)
+
+    def _transform_hand_joints(self, hand_joint_dict):
+        if self.robot_type == "tienkung":
+            transform_joints_dict = {}
+            for name, joints in hand_joint_dict.items():
+                if np.array(joints).shape[0] == 1:
+                    target_joint = [-0.5 * joints[0] + 1] * 6
+                    target_joint[-1] = 0
+                else:
+                    target_joint = [(1 - joints[0]) * 2]
+                transform_joints_dict[name] = target_joint
+
+            return transform_joints_dict
+        else:
+            raise NotImplementedError("Unknown robot type")
+
 
     def close(self):
         return
