@@ -14,8 +14,9 @@ class HumanIntervention(gym.ActionWrapper):
     def __init__(self, env, action_indices=None):
         super().__init__(env)
         self.robot_type = env.unwrapped.robot_type
-        self.env.unwrapped.init_xtele() # init xtele
-        self.control_mode = env.unwrapped.control_mode
+        self.dual_arm = env.unwrapped.dual_arm
+        self.env.unwrapped.init_xtele()  # init xtele
+        self.control_mode = env.unwrapped.control_mode # 控制模式
     
 
     def reset(self, **kwargs):
@@ -35,34 +36,59 @@ class HumanIntervention(gym.ActionWrapper):
     
 
     def action(self, action: np.ndarray) -> np.ndarray:
-        # intervened = True
         intervened = shared_state.human_intervention_key
         if intervened:
             try:
                 obs = self.env.unwrapped.get_xtele()
                 xtele_joints, xtele_pose = obs['joints'], obs['pose']
-                # print("gripper_value:", len(xtele_joints), xtele_joints[-1])
+
                 if self.control_mode == "joint":
                     expert_a = xtele_joints
                 else:
-                    curr_matrix = self.pose2matrix(self.env.unwrapped.currpos)
-                    tar_matrix = self.pose2matrix(xtele_pose)
-                    T_diff_matrix = np.dot(np.linalg.inv(curr_matrix), tar_matrix)
+                    epsilon = 1e-6
+                    if self.dual_arm:
+
+                        if "tienkung" in self.robot_type:
+                            expert_a = []
+                            # 逐臂计算
+                            for name, target_pose in xtele_pose.items():
+                                curr_pose = self.env.unwrapped.currpos[name]
+                                curr_matrix = self.pose2matrix(curr_pose)
+                                tar_matrix = self.pose2matrix(target_pose)
+                                T_diff_matrix = np.dot(np.linalg.inv(curr_matrix), tar_matrix)
+                                rel_rot = Rotation.from_matrix(T_diff_matrix[:3, :3]).as_euler("xyz")  # 相对旋转（欧拉角）
+                                rel_pos = T_diff_matrix[:3, 3]  # 相对位置
+                                
+                                tmp_a = np.zeros(7, dtype=np.float64)  # ⚠️ 硬编码 7 维
+                                tmp_a[:3] = rel_pos / self.env.unwrapped.action_scale[0]  # 位置增量（归一化）
+                                tmp_a[3:6] = rel_rot / self.env.unwrapped.action_scale[1]  # 旋转增量（归一化）
+                                tmp_a[6:] = xtele_joints[name][-1] / self.env.unwrapped.action_scale[2]  # 夹爪（归一化）
+                                """
+                                intervention action 边缘裁剪
+                                """
+                                tmp_a = np.clip(tmp_a, [-1.0+epsilon, -1.0+epsilon, -1.0+epsilon, -1.0+epsilon, -1.0+epsilon, -1.0+epsilon, 0.0], [1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0])
+                                expert_a += tmp_a.tolist()
+                            expert_a = np.array(expert_a)
+                        else:
+                            raise NotImplementedError("Unknown robot type")
+                    else:
+                        curr_matrix = self.pose2matrix(self.env.unwrapped.currpos)
+                        tar_matrix = self.pose2matrix(xtele_pose)
+                        T_diff_matrix = np.dot(np.linalg.inv(curr_matrix), tar_matrix)
 
                     
-                rel_rot = Rotation.from_matrix(T_diff_matrix[:3, :3]).as_euler("xyz")
-                rel_pos = T_diff_matrix[:3, 3]
-                expert_a = np.zeros(7, dtype=np.float32)
-                expert_a[:3] = rel_pos / self.env.unwrapped.action_scale[0]
-                expert_a[3:6] = rel_rot / self.env.unwrapped.action_scale[1]
-                expert_a[6:] = xtele_joints[-1] / self.env.unwrapped.action_scale[2]
-                
-                # expert_a = np.clip(expert_a, [-1]*7, [1]*7)
-                """
-                intervention action 边缘裁剪
-                """
-                epsilon = 1e-6
-                expert_a[0:6]= expert_a[0:6].clip(-1+epsilon, 1-epsilon)
+                        rel_rot = Rotation.from_matrix(T_diff_matrix[:3, :3]).as_euler("xyz")
+                        rel_pos = T_diff_matrix[:3, 3]
+                        expert_a = np.zeros(7, dtype=np.float32)
+                        expert_a[:3] = rel_pos / self.env.unwrapped.action_scale[0]
+                        expert_a[3:6] = rel_rot / self.env.unwrapped.action_scale[1]
+                        expert_a[6:] = xtele_joints[-1] / self.env.unwrapped.action_scale[2]
+                        
+                        # expert_a = np.clip(expert_a, [-1]*7, [1]*7)
+                        """
+                        intervention action 边缘裁剪
+                        """
+                        expert_a = np.clip(expert_a, [-1.0+epsilon, -1.0+epsilon, -1.0+epsilon, -1.0+epsilon, -1.0+epsilon, -1.0+epsilon, 0.0], [1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0])
 
                 return expert_a, xtele_joints, True
             except Exception as e:
