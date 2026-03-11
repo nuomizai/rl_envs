@@ -206,8 +206,8 @@ class BaseEnv(gym.Env):
                 pose[:3], xyz_bounding_box.low, xyz_bounding_box.high
             )
         else:
-            pose[3:] = np.clip(
-                pose[3:], self.xyz_bounding_box.low, self.xyz_bounding_box.high
+            pose[:3] = np.clip(
+                pose[:3], self.xyz_bounding_box.low, self.xyz_bounding_box.high
             )
         return pose
 
@@ -240,7 +240,7 @@ class BaseEnv(gym.Env):
             }
             return recv 
         elif 'franka' in self.robot_type:
-            self.tele_agent.exit_any_sync()
+            self.tele_agent.exit_any_sync(0)
             joints = self.tele_agent.act()
             joints = list(joints)
             xtele_ee_pose = self.robot_station.get_ee_pose_from_joint(joints[0:self.joint_dim])
@@ -409,6 +409,7 @@ class BaseEnv(gym.Env):
 
 
     def reset(self, **kwargs):
+        self._update_currpos()
         self.last_gripper_act = time.time()
         if self.dual_arm:
             self.last_gripper_value = {
