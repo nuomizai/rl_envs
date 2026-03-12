@@ -34,7 +34,7 @@ class HumanIntervention(gym.ActionWrapper):
         pose_matrix[:3, 3] = pose_t
         return pose_matrix
 
-    def compute_expert_action(self, curr_pose, target_pose):
+    def compute_expert_action(self, curr_pose, target_pose, target_joint):
         curr_matrix = self.pose2matrix(curr_pose)
         tar_matrix = self.pose2matrix(target_pose)
         T_diff_matrix = np.dot(np.linalg.inv(curr_matrix), tar_matrix)
@@ -43,7 +43,7 @@ class HumanIntervention(gym.ActionWrapper):
         expert_a = np.zeros(7, dtype=np.float64) # xyz+rpy+gripper
         expert_a[:3] = rel_pos / self.env.unwrapped.action_scale[0] # 位置增量
         expert_a[3:6] = rel_rot / self.env.unwrapped.action_scale[1] # 旋转增量
-        expert_a[6:] = target_pose[-1] / self.env.unwrapped.action_scale[2] # 夹爪
+        expert_a[6:] = target_joint[-1] / self.env.unwrapped.action_scale[2] # 夹爪
         
         """
         intervention action 边缘裁剪
@@ -69,14 +69,14 @@ class HumanIntervention(gym.ActionWrapper):
                             # 逐臂计算
                             for name, single_target_pose in xtele_pose.items():
                                 single_curr_pose = self.env.unwrapped.currpos[name]
-                                single_expert_a = self.compute_expert_action(single_curr_pose, single_target_pose)
+                                single_expert_a = self.compute_expert_action(single_curr_pose, single_target_pose, xtele_joints[name])
                                 expert_a += single_expert_a.tolist()
                             expert_a = np.array(expert_a)
                         else:
                             raise NotImplementedError("Unknown robot type")
                     else:
                         curr_pose = self.env.unwrapped.currpos
-                        expert_a = self.compute_expert_action(curr_pose, xtele_pose)
+                        expert_a = self.compute_expert_action(curr_pose, xtele_pose, xtele_joints)
 
                 return expert_a, xtele_joints, True
             except Exception as e:

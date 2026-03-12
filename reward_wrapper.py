@@ -146,12 +146,14 @@ class MultiCameraBinaryRewardClassifierWrapper(gym.Wrapper):
         shared_state.terminate = False
         obs, info = self.env.reset(**kwargs)
 
-        if not os.path.exists(f"online_right_image.png"):
-            cv2.imwrite(f"online_right_image.png", obs["right"])
-            cv2.imwrite(f"online_wrist_image.png", obs["wrist"])
-            print("online_right_image shape:", obs["right"].shape)
-            print("online_wrist_image shape:", obs["wrist"].shape)
-            print('online_right_image has been saved!!!!!!!!!!!')
+        for key in obs.keys():
+            if key != "state":
+                if not os.path.exists(f"resize_online_image_{key}.png"):
+                    bgr = cv2.cvtColor(obs[key], cv2.COLOR_RGB2BGR)
+                    cv2.imwrite(f"resize_online_image_{key}.png", bgr)
+                    print(f"resize_online_image_{key}.png shape:", obs[key].shape)
+                    print(f"resize_online_image_{key}.png has been saved!!!!!!!!!!!")
+
         reward_obs = copy.deepcopy(obs)
         reward_obs = make_policy_obs(reward_obs, self.device, self.robot_type)
         self.last_obs = reward_obs
@@ -358,6 +360,8 @@ class GripperPenaltyWrapper(gym.Wrapper):
         if "intervene_action" in info:
             action = info["intervene_action"]
 
+        info['discrete_penalty'] == 0.0
+
         if self.dual_arm:
             if "tienkung" in self.robot_type:
                 dual_action = {
@@ -367,8 +371,8 @@ class GripperPenaltyWrapper(gym.Wrapper):
                 for name in self.curr_arm_joints.keys():
                     # 双臂动作有一个触发夹爪惩罚时，即进行惩罚
                     if info['discrete_penalty'] == 0.0:
-                        if (dual_action[name][-1] > 0.3 and self.last_gripper_pos[name] < 0.3) or (
-                            dual_action[name][-1] < 0.5 and self.last_gripper_pos[name] > 0.5):
+                        if (dual_action[name][-1] > 0.3 and self.last_gripper_pos[name][0] < 0.3) or (
+                            dual_action[name][-1] < 0.5 and self.last_gripper_pos[name][0] > 0.5):
                             info['discrete_penalty'] = -0.5
                         else:
                             info['discrete_penalty'] = 0.0

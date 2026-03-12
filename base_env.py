@@ -479,7 +479,7 @@ class BaseEnv(gym.Env):
                     assert len(goal_joint) == self.joint_dim
 
                     curr_joint = np.concatenate([
-                        self.curr_arm_joints[name], np.array([self.curr_gripper_joints[name]])
+                        self.curr_arm_joints[name], np.array(self.curr_gripper_joints[name])
                     ])
                     goal_joint = np.concatenate([goal_joint, np.array([self.last_gripper_value[name]])])
                     cnt = int(3 / (1 / self.hz))
