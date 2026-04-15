@@ -101,6 +101,123 @@ class HumanIntervention(gym.ActionWrapper):
 
 
 
+class SpaceMouseIntervention(gym.ActionWrapper):
+    """Override policy actions with SpaceMouse actions when operator input is detected."""
+
+    def __init__(
+        self,
+        env,
+        action_indices=None,
+        deadzone=1e-3,
+        axis_deadzone=None,
+        enable_gripper=True,
+        expert=None,
+        translation_scale=1.0,
+        rotation_scale=1.0,
+        axis_signs=None,
+    ):
+        super().__init__(env)
+        self.action_indices = action_indices
+        self.deadzone = float(deadzone)
+        self.axis_deadzone = float(axis_deadzone if axis_deadzone is not None else deadzone)
+        self.translation_scale = float(translation_scale)
+        self.rotation_scale = float(rotation_scale)
+        if axis_signs is None:
+            axis_signs = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        axis_signs = np.asarray(axis_signs, dtype=np.float32).reshape(-1)
+        if axis_signs.size != 6:
+            raise ValueError(f"spacemouse_axis_signs must have 6 values, got {axis_signs.size}")
+        self.axis_signs = axis_signs
+        self.gripper_enabled = bool(enable_gripper) and int(self.action_space.shape[0]) >= 7
+        self.left = False
+        self.right = False
+
+        if expert is None:
+            try:
+                from rl_envs.spacemouse.spacemouse_expert import SpaceMouseExpert
+            except Exception as exc:
+                raise ImportError(
+                    "Failed to import SpaceMouse runtime. Install dependency 'easyhid' "
+                    "and verify HID permissions for SpaceMouse access."
+                ) from exc
+
+            self.expert = SpaceMouseExpert()
+        else:
+            self.expert = expert
+
+    def _get_expert_action(self):
+        expert_a, buttons = self.expert.get_action()
+        expert_a = np.asarray(expert_a, dtype=np.float32).reshape(-1)
+        buttons = list(buttons) if buttons is not None else []
+
+        if expert_a.size >= 6:
+            motion = expert_a[:6].copy()
+        else:
+            motion = np.zeros((6,), dtype=np.float32)
+            motion[:expert_a.size] = expert_a
+
+        # Calibrate SpaceMouse direction/sensitivity in one place.
+        motion[:3] = motion[:3] * self.translation_scale
+        motion[3:6] = motion[3:6] * self.rotation_scale
+        motion = motion * self.axis_signs
+        # Suppress small per-axis jitter so idle hand does not move the robot.
+        motion[np.abs(motion) < self.axis_deadzone] = 0.0
+        expert_a = motion
+
+        if len(buttons) >= 2:
+            self.left, self.right = bool(buttons[0]), bool(buttons[1])
+        else:
+            self.left, self.right = False, False
+
+        intervened = np.linalg.norm(expert_a) > self.deadzone
+
+        if self.gripper_enabled:
+            if self.left:
+                gripper_action = np.array([-1.0], dtype=np.float32)
+                intervened = True
+            elif self.right:
+                gripper_action = np.array([1.0], dtype=np.float32)
+                intervened = True
+            else:
+                gripper_action = np.array([0.0], dtype=np.float32)
+
+            if expert_a.shape[0] >= 6:
+                expert_a = np.concatenate((expert_a[:6], gripper_action), axis=0)
+            else:
+                expert_a = np.concatenate((np.zeros((6,), dtype=np.float32), gripper_action), axis=0)
+
+        target_dim = int(self.action_space.shape[0])
+        if expert_a.shape[0] < target_dim:
+            expert_a = np.pad(expert_a, (0, target_dim - expert_a.shape[0]), mode="constant")
+        elif expert_a.shape[0] > target_dim:
+            expert_a = expert_a[:target_dim]
+
+        if self.action_indices is not None:
+            filtered = np.zeros_like(expert_a)
+            filtered[self.action_indices] = expert_a[self.action_indices]
+            expert_a = filtered
+
+        return expert_a.astype(np.float32), intervened
+
+    def step(self, action):
+        expert_action, replaced = self._get_expert_action()
+        exec_action = expert_action if replaced else action
+
+        obs, rew, terminated, truncated, info = self.env.step(exec_action)
+        info["spacemouse_action_norm"] = float(np.linalg.norm(expert_action[:6]))
+        info["executed_action"] = np.asarray(exec_action, dtype=np.float32)
+        if replaced:
+            info["intervene_action"] = np.asarray(exec_action, dtype=np.float32)
+        info["is_intervention"] = bool(replaced)
+        info["left"] = self.left
+        info["right"] = self.right
+        return obs, rew, terminated, truncated, info
+
+    def close(self):
+        if hasattr(self.expert, "close"):
+            self.expert.close()
+        return self.env.close()
+        
 
 class AugmentedObservationWrapper(gym.ObservationWrapper):
     def __init__(self, env):
