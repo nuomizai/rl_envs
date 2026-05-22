@@ -13,8 +13,18 @@ from typing import Dict, Tuple, Optional, Union, Any, List
 from pathlib import Path
 
 
-from rl_envs.xrocs.core.config_loader import ConfigLoader
-from rl_envs.xrocs.core.station_loader import StationLoader
+# xrocs is optional — only required for franka/ur/tienkung. SO101 uses
+# rl_envs.so101_station.SO101Station instead, which talks to lerobot.SO101Follower
+# directly without any xrocs dependency.
+try:
+    from rl_envs.xrocs.core.config_loader import ConfigLoader
+    from rl_envs.xrocs.core.station_loader import StationLoader
+    _XROCS_AVAILABLE = True
+except ImportError as _xrocs_err:
+    ConfigLoader = None  # type: ignore
+    StationLoader = None  # type: ignore
+    _XROCS_AVAILABLE = False
+    _XROCS_IMPORT_ERROR = _xrocs_err
 
 
 ##############################################################################
@@ -143,17 +153,29 @@ class BaseEnv(gym.Env):
 
         if fake_env:
             print_green("fake env : not connect to robot")
-            return 
+            return
 
-        # 使用基于文件位置的路径，避免依赖工作目录
-        # Use file-based path to avoid dependency on working directory
-        base_dir = Path(__file__).parent.absolute()
-        config_path = base_dir / "xrocs" / "configuration.toml"
-        cfg_loader = ConfigLoader(str(config_path))
-        self.cfg_dict = cfg_loader.get_config()
-        station_loader = StationLoader(self.cfg_dict)
-        self.robot_station = station_loader.generate_station_handle()
-        self.robot_station.connect()
+        # ───── SO101: lerobot.SO101Follower (Feetech USB), no xrocs ─────
+        if "so101" in self.robot_type:
+            from rl_envs.so101_station import SO101Station
+            self.robot_station = SO101Station(config)
+            self.robot_station.connect()
+            self.cfg_dict = None  # xrocs-only field, kept for compatibility
+        else:
+            # ───── franka / ur / tienkung: xrocs station ─────
+            if not _XROCS_AVAILABLE:
+                raise ImportError(
+                    f"xrocs is not installed but robot_type={self.robot_type!r} requires it. "
+                    f"Install xrocs (rl_envs/xrocs && pip install -e .) or switch to "
+                    f"robot_type containing 'so101'. Original import error: {_XROCS_IMPORT_ERROR}"
+                )
+            base_dir = Path(__file__).parent.absolute()
+            config_path = base_dir / "xrocs" / "configuration.toml"
+            cfg_loader = ConfigLoader(str(config_path))
+            self.cfg_dict = cfg_loader.get_config()
+            station_loader = StationLoader(self.cfg_dict)
+            self.robot_station = station_loader.generate_station_handle()
+            self.robot_station.connect()
 
         if self.dual_arm:
             xyz_limits = {}
@@ -228,6 +250,13 @@ class BaseEnv(gym.Env):
         """
         获取遥操作设备状态
         """
+        if "so101" in self.robot_type:
+            # SO101 uses SO101LeaderIntervention wrapper (see rl_envs/wrappers.py)
+            # which talks to the leader arm directly. The xtele path is unused.
+            raise NotImplementedError(
+                "SO101 intervention does not go through xtele. Use "
+                "intervention_backend='leader_so101' in cfg/config.yaml."
+            )
         if 'ur' in self.robot_type:
             self.tele_agent.switch_act()
             joints = self.tele_agent.act()
@@ -267,16 +296,23 @@ class BaseEnv(gym.Env):
         """
         初始化遥操作模块
         """
+        if "so101" in self.robot_type:
+            # SO101 leader is handled by SO101LeaderIntervention wrapper, not xtele.
+            return
         if 'ur' in self.robot_type or 'franka' in self.robot_type or "tienkung" in self.robot_type:
             from xtele.core.integrate_module import TeleCore
             self.tele_agent = TeleCore()
-        else:   
+        else:
             raise NotImplementedError("Unknown robot type")
 
     def sync_xtele(self, timeout: float = 5):
         """
         同步机器人状态到遥操作设备
         """
+        if "so101" in self.robot_type:
+            # SO101 leader→follower sync is handled inside SO101LeaderIntervention.step()
+            # (writes follower joint readings to leader Goal_Position every tick).
+            return
 
         if 'ur' in self.robot_type:
             goal = np.append(self.curr_arm_joints, self.curr_gripper_joints)
@@ -612,6 +648,17 @@ class BaseEnv(gym.Env):
                     }
                 }
                 obs = self.robot_station.step(robot_target)
+            elif "so101" in self.robot_type:
+                # SO101 joint mode: same xrocs-style payload as UR (joints + hand binary).
+                # SO101Station.step() converts the binary gripper to stroke percent internally.
+                robot_target = {
+                    "arm_joints": {
+                        "single": joints[0:self.joint_dim]
+                    },
+                    "hand_joints": {"single": self.last_gripper_value}
+                }
+                obs = self.robot_station.step(robot_target)
+                return obs
             else:
                 raise NotImplementedError("Unknown robot type")
 
@@ -699,8 +746,18 @@ class BaseEnv(gym.Env):
             for key, cap in obs["images"].items():
                 if key not in self._image_keys:
                     continue
-                rgb, _ = decoder_image(cap, None, bgr2rgb=self._bgr2rgb)
-                images[key] = rgb 
+                # SO101 path: SO101Station.get_obs() already returns RGB uint8 ndarrays
+                # (H, W, 3) from lerobot OpenCVCamera. xrocs station returns JPEG bytes
+                # that need cv2.imdecode via decoder_image().
+                if "so101" in self.robot_type:
+                    rgb = cap
+                    if hasattr(rgb, "numpy"):
+                        rgb = rgb.numpy()
+                    if rgb.dtype != np.uint8:
+                        rgb = rgb.astype(np.uint8)
+                else:
+                    rgb, _ = decoder_image(cap, None, bgr2rgb=self._bgr2rgb)
+                images[key] = rgb
                 if not os.path.exists(f"online_image_{key}.png"):
                     cv2.imwrite(f"online_image_{key}.png", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
             if self.dual_arm:
@@ -725,6 +782,12 @@ class BaseEnv(gym.Env):
 
     def _get_obs_from_robot(self) -> dict:
         obs = self.robot_station.get_obs()
+
+        # SO101 joint mode: SO101Station already returns the identity arm_pose 7-vec
+        # (no FK), no quaternion canonicalization needed.
+        if "so101" in self.robot_type:
+            return obs
+
         if self.dual_arm:
             if "tienkung" in self.robot_type:
                 arm_pose = obs["arm_pose"]

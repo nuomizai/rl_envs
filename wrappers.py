@@ -217,7 +217,124 @@ class SpaceMouseIntervention(gym.ActionWrapper):
         if hasattr(self.expert, "close"):
             self.expert.close()
         return self.env.close()
-        
+
+
+class SO101LeaderIntervention(gym.ActionWrapper):
+    """SO101 leader-arm intervention for joint control.
+
+    Two modes (auto-switched based on leader-follower joint position error):
+
+    1. Non-intervention (policy autonomous):
+       - leader.Torque_Enable = 1 (active servo)
+       - Every step: read follower joint state, write to leader Goal_Position
+       - Result: leader physically mirrors follower so when the human grabs the leader,
+         it is already at the correct pose and there is no jump.
+
+    2. Intervention (human takes over):
+       - leader.Torque_Enable = 0 (passive, can be moved by hand)
+       - Every step: read leader joint state, replace action with it
+       - follower copies leader joint position (1:1, no IK in joint mode)
+
+    Switch trigger: ||leader_arm_joints - follower_arm_joints||_2 > error_threshold
+    (excludes gripper since gripper jitter is unrelated to "user is grabbing the arm").
+
+    Reference: lerobot fork's BaseLeaderControlWrapper in
+    src/lerobot/scripts/rl/gym_manipulator.py (EE-delta variant for SO100). This is the
+    joint-mode simplification.
+    """
+
+    def __init__(self, env, error_threshold_deg=8.0, gripper_binary_threshold_pct=15.0):
+        super().__init__(env)
+        self.error_threshold = float(error_threshold_deg)
+        self.gripper_binary_threshold = float(gripper_binary_threshold_pct)
+        self.leader = None
+        self._leader_motor_names = None
+        self.leader_torque_enabled = False
+        self._setup_leader()
+
+    def _setup_leader(self):
+        from lerobot.teleoperators.so101_leader import SO101Leader
+        from lerobot.teleoperators.so101_leader.config_so101_leader import SO101LeaderConfig
+
+        cfg = self.env.unwrapped.config
+        leader_cfg = SO101LeaderConfig(
+            port=str(cfg.so101_leader_port),
+            id=str(cfg.so101_leader_id),
+        )
+        self.leader = SO101Leader(leader_cfg)
+        self.leader.connect()
+        self._leader_motor_names = list(self.leader.bus.motors)
+
+    def _read_leader_joints(self):
+        action = self.leader.get_action()
+        return np.array(
+            [float(action[f"{n}.pos"]) for n in self._leader_motor_names], dtype=np.float32
+        )
+
+    def _read_follower_joints(self):
+        obs = self.env.unwrapped.robot_station.get_obs()
+        return np.asarray(obs["arm_joints"]["single"], dtype=np.float32)
+
+    def _enable_leader_torque(self):
+        if not self.leader_torque_enabled:
+            self.leader.bus.sync_write("Torque_Enable", 1)
+            self.leader_torque_enabled = True
+
+    def _disable_leader_torque(self):
+        if self.leader_torque_enabled:
+            self.leader.bus.sync_write("Torque_Enable", 0)
+            self.leader_torque_enabled = False
+
+    def _mirror_leader_to_follower(self):
+        """Drive leader to match follower current joint state (active servo)."""
+        self._enable_leader_torque()
+        follower = self._read_follower_joints()  # 6-dim (5 arm + 1 gripper)
+        goal = {f"{n}": float(follower[i]) for i, n in enumerate(self._leader_motor_names)}
+        self.leader.bus.sync_write("Goal_Position", goal)
+
+    def step(self, action):
+        leader = self._read_leader_joints()
+        follower = self._read_follower_joints()
+
+        # Auto-detect: large leader-follower arm joint error == human is grabbing leader
+        arm_err = float(np.linalg.norm(leader[:-1] - follower[:-1]))
+        is_intervention = arm_err > self.error_threshold
+
+        if is_intervention:
+            self._disable_leader_torque()
+            # joint-mode: replace action with leader joint reading (5 arm deg + 1 binary gripper)
+            arm_target = leader[:-1]
+            gripper_binary = 1.0 if leader[-1] > self.gripper_binary_threshold else 0.0
+            new_action = np.concatenate([arm_target, [gripper_binary]]).astype(np.float32)
+            obs, rew, terminated, truncated, info = self.env.step(new_action)
+            info["intervene_action"] = new_action
+            info["is_intervention"] = True
+        else:
+            # Mirror leader to follower so it stays in sync; ready for next grab.
+            self._mirror_leader_to_follower()
+            obs, rew, terminated, truncated, info = self.env.step(action)
+            info["is_intervention"] = False
+
+        info["leader_follower_arm_error_deg"] = arm_err
+        return obs, rew, terminated, truncated, info
+
+    def reset(self, **kwargs):
+        obs, info = self.env.reset(**kwargs)
+        self._mirror_leader_to_follower()
+        info["is_intervention"] = False
+        return obs, info
+
+    def close(self):
+        try:
+            self._disable_leader_torque()
+        finally:
+            if self.leader is not None:
+                try:
+                    self.leader.disconnect()
+                except Exception:
+                    pass
+        return self.env.close()
+
 
 class AugmentedObservationWrapper(gym.ObservationWrapper):
     def __init__(self, env):
