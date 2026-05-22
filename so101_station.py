@@ -42,6 +42,34 @@ class SO101Station:
         self.follower = None
         self._motor_names = None
 
+        # Policy action unnormalize bounds. SAC actor with use_tanh_squash=true outputs
+        # joint targets in [-1, 1]. base_env._send_joint_command forwards the action
+        # to station.step() unchanged, so we must map [-1, 1] -> physical joint degrees here.
+        # Bounds come from cube_103ep dataset min/max with a small safety buffer.
+        # If cfg fields missing, use identity mapping (debug only — will not produce
+        # meaningful motion).
+        joint_min = getattr(cfg, "so101_joint_action_min", None)
+        joint_max = getattr(cfg, "so101_joint_action_max", None)
+        if joint_min is None or joint_max is None:
+            import logging
+            logging.warning(
+                "[SO101Station] so101_joint_action_min/max not in cfg — action stays in [-1,1] "
+                "range as raw degrees (not physically meaningful). Set bounds in robot_type yaml."
+            )
+            self._unnormalize_enabled = False
+        else:
+            self._unnormalize_enabled = True
+            self._joint_min = np.asarray(list(joint_min), dtype=np.float32)
+            self._joint_max = np.asarray(list(joint_max), dtype=np.float32)
+            assert self._joint_min.shape == (self.joint_dim,), (
+                f"so101_joint_action_min must be length {self.joint_dim}, got {self._joint_min.shape}"
+            )
+            assert self._joint_max.shape == (self.joint_dim,), (
+                f"so101_joint_action_max must be length {self.joint_dim}, got {self._joint_max.shape}"
+            )
+            self._joint_mid = (self._joint_min + self._joint_max) / 2.0
+            self._joint_half = (self._joint_max - self._joint_min) / 2.0
+
     def _build_follower(self):
         # Deferred imports so the module can be imported without lerobot fully ready
         # (e.g. during fake_env dry-runs or static analysis).
@@ -86,7 +114,17 @@ class SO101Station:
         self._connected = False
 
     def _extract_command(self, robot_target: dict):
-        """Parse robot_target dict (xrocs-style) into (arm_deg[5], gripper_pct[1])."""
+        """Parse robot_target dict (xrocs-style) into (arm_deg[5], gripper_pct[1]).
+
+        The arm command comes in as the policy's raw output. With SAC + use_tanh_squash=true
+        the actor produces values in [-1, 1]; we linearly map to physical joint degrees
+        using cube_103ep dataset min/max from so101_joint_action_min/max in cfg.
+
+        Intervention overrides (SO101LeaderIntervention.step) already provide degree values
+        from the leader arm; those are in physical range but to keep a single code path we
+        let the unnormalize map clamp them back. To detect-and-skip, we look for any arm
+        value outside [-1.05, 1.05] and treat that as "already in degrees, no unnormalize".
+        """
         if "arm_joints" in robot_target and "hand_joints" in robot_target:
             arm = np.asarray(robot_target["arm_joints"]["single"]).flatten()
             gripper_raw = np.asarray(robot_target["hand_joints"]["single"]).flatten()[0]
@@ -103,6 +141,14 @@ class SO101Station:
             raise ValueError(
                 f"SO101 arm command dim {arm.shape[0]} != joint_dim {self.joint_dim}"
             )
+
+        # Unnormalize: [-1, 1] -> [joint_min, joint_max]. Skip if value already
+        # looks like physical degrees (intervention from leader arm).
+        if self._unnormalize_enabled:
+            looks_normalized = bool(np.all(np.abs(arm) <= 1.05))
+            if looks_normalized:
+                arm_clipped = np.clip(arm.astype(np.float32), -1.0, 1.0)
+                arm = self._joint_mid + self._joint_half * arm_clipped
 
         # gripper is binary in hilserl (0=closed, 1=open); convert to percent.
         gripper_pct = float(
