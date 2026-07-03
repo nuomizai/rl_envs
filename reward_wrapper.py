@@ -249,6 +249,8 @@ class MultiCameraBinaryRewardClassifierWrapper(gym.Wrapper):
                 # Sample equal number of positive and negative examples
                 pos_sample = next(pos_iterator)
                 neg_sample = next(neg_iterator)
+                pos_sample["is_intervention"] = pos_sample["complementary_info"]["is_intervention"]
+                neg_sample["is_intervention"] = neg_sample["complementary_info"]["is_intervention"]
                 # # Merge and create labels
                 batch = concatenate_batch_transitions(pos_sample, neg_sample)
 
@@ -360,7 +362,7 @@ class GripperPenaltyWrapper(gym.Wrapper):
         if "intervene_action" in info:
             action = info["intervene_action"]
 
-        info['discrete_penalty'] == 0.0
+        info['discrete_penalty'] = 0.0
 
         if self.dual_arm:
             if "tienkung" in self.robot_type:

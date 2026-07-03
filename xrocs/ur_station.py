@@ -80,19 +80,13 @@ class URStation:
         return self._hand_dict
     
     def execute_action(self, action: dict[str, dict]) -> None:
-        if "arm" in action:
-            if 'position' in action["arm"]:
-                arm_mode = "position"
-            elif 'pose' in action["arm"]:
-                arm_mode = "pose"
-            elif 'hybrid' in action["arm"]:
-                arm_mode = "hybrid"
-            for name, joints in action["arm"][arm_mode].items():
+        if "arm_joints" in action:
+            for name, joints in action["arm_joints"].items():
                 if name in self._robot_dict:
                     self._robot_dict[name].sync_target_joint(joints)
 
-        if "hand" in action:
-            for name, joints in action["hand"]["position"].items():
+        if "hand_joints" in action:
+            for name, joints in action["hand_joints"].items():
                 if name in self._hand_dict:
                     self._hand_dict[name].sync_target_joint(joints)
         self._rate.sleep()

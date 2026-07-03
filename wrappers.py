@@ -40,7 +40,7 @@ class HumanIntervention(gym.ActionWrapper):
         T_diff_matrix = np.dot(np.linalg.inv(curr_matrix), tar_matrix)
         rel_rot = Rotation.from_matrix(T_diff_matrix[:3, :3]).as_euler("xyz")  # 相对旋转（欧拉角）
         rel_pos = T_diff_matrix[:3, 3]  # 相对位置
-        expert_a = np.zeros(7, dtype=np.float64) # xyz+rpy+gripper
+        expert_a = np.zeros(7, dtype=np.float32) # xyz+rpy+gripper
         expert_a[:3] = rel_pos / self.env.unwrapped.action_scale[0] # 位置增量
         expert_a[3:6] = rel_rot / self.env.unwrapped.action_scale[1] # 旋转增量
         expert_a[6:] = target_joint[-1] / self.env.unwrapped.action_scale[2] # 夹爪
@@ -50,6 +50,7 @@ class HumanIntervention(gym.ActionWrapper):
         """
         epsilon = 1e-6
         expert_a = np.clip(expert_a, [-1.0+epsilon, -1.0+epsilon, -1.0+epsilon, -1.0+epsilon, -1.0+epsilon, -1.0+epsilon, 0.0], [1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0])
+        expert_a = np.asarray(expert_a, dtype=np.float32)
         return expert_a
     
 
