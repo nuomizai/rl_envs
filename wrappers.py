@@ -8,7 +8,28 @@ from gymnasium.spaces import flatten_space, flatten
 from rl_envs.shared_state import shared_state
 import cv2
 import traceback
+from pynput import keyboard
 import sys
+
+def on_press(key):
+    try:
+        if str(key) == 'Key.scroll_lock':
+            print("----------------set human intervention key to {}!----------------".format(shared_state.human_intervention_key))
+            shared_state.human_intervention_key = not shared_state.human_intervention_key
+            time.sleep(0.5)
+        if str(key) == 'Key.space' or str(key) == 'Key.pause':
+            print("----------------set terminate to true!----------------")
+            shared_state.terminate = True
+            time.sleep(0.5)
+    except AttributeError:
+        pass
+try:
+    listener = keyboard.Listener(
+        on_press=on_press)
+    listener.start()
+except Exception as e:
+    print("error in keyboard listener:", e)
+    exit(0)
 
 class HumanIntervention(gym.ActionWrapper):
     def __init__(self, env, action_indices=None):
@@ -16,7 +37,7 @@ class HumanIntervention(gym.ActionWrapper):
         self.robot_type = env.unwrapped.robot_type
         self.dual_arm = env.unwrapped.dual_arm
         self.env.unwrapped.init_xtele()  # init xtele
-        self.control_mode = env.unwrapped.control_mode # 控制模式
+        self.control_mode = env.unwrapped.control_mode # Control mode
     
 
     def reset(self, **kwargs):
@@ -38,15 +59,15 @@ class HumanIntervention(gym.ActionWrapper):
         curr_matrix = self.pose2matrix(curr_pose)
         tar_matrix = self.pose2matrix(target_pose)
         T_diff_matrix = np.dot(np.linalg.inv(curr_matrix), tar_matrix)
-        rel_rot = Rotation.from_matrix(T_diff_matrix[:3, :3]).as_euler("xyz")  # 相对旋转（欧拉角）
-        rel_pos = T_diff_matrix[:3, 3]  # 相对位置
+        rel_rot = Rotation.from_matrix(T_diff_matrix[:3, :3]).as_euler("xyz")  # Relative rotation (Euler angles)
+        rel_pos = T_diff_matrix[:3, 3]  # Relative position
         expert_a = np.zeros(7, dtype=np.float32) # xyz+rpy+gripper
-        expert_a[:3] = rel_pos / self.env.unwrapped.action_scale[0] # 位置增量
-        expert_a[3:6] = rel_rot / self.env.unwrapped.action_scale[1] # 旋转增量
-        expert_a[6:] = target_joint[-1] / self.env.unwrapped.action_scale[2] # 夹爪
+        expert_a[:3] = rel_pos / self.env.unwrapped.action_scale[0] # Position delta
+        expert_a[3:6] = rel_rot / self.env.unwrapped.action_scale[1] # Rotation delta
+        expert_a[6:] = target_joint[-1] / self.env.unwrapped.action_scale[2] # Gripper
         
         """
-        intervention action 边缘裁剪
+        Clip the intervention action at the action limits
         """
         epsilon = 1e-6
         expert_a = np.clip(expert_a, [-1.0+epsilon, -1.0+epsilon, -1.0+epsilon, -1.0+epsilon, -1.0+epsilon, -1.0+epsilon, 0.0], [1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0-epsilon, 1.0])
@@ -67,7 +88,7 @@ class HumanIntervention(gym.ActionWrapper):
                     if self.dual_arm:
                         if "tienkung" in self.robot_type:
                             expert_a = []
-                            # 逐臂计算
+                            # Per-arm computation
                             for name, single_target_pose in xtele_pose.items():
                                 single_curr_pose = self.env.unwrapped.currpos[name]
                                 single_expert_a = self.compute_expert_action(single_curr_pose, single_target_pose, xtele_joints[name])
